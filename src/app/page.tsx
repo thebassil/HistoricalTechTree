@@ -1,6 +1,7 @@
 import TechTreeEditor from '../components/ui/tech-tree-editor'
 import { supabase, supabaseConfigured } from '@/lib/supabaseClient'
 import type { TechNode } from '@/lib/types/tech-tree'
+import seedData from '@/data/developments.json'
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
@@ -19,6 +20,12 @@ export default async function Home() {
       ...node,
       expanded: false,
     })) as TechNode[]
+  } else {
+    // Load from local JSON seed data when Supabase is not configured
+    processedNodes = (seedData as TechNode[]).map(node => ({
+      ...node,
+      expanded: false,
+    }))
   }
 
   return (
