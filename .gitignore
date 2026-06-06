@@ -36,6 +36,16 @@ yarn-error.log*
 # vercel
 .vercel
 
+# mutagen bridge mounts
+_system_design/
+_repo/
+
+# specstory
+.specstory/
+
+# misc
+excalidraw.log
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

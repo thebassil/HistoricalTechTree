@@ -5,7 +5,7 @@ import type React from "react"
 import { useState, useEffect, useMemo, useRef } from "react"
 import type { TechNode, NewDevelopment } from "@/lib/types/tech-tree"
 import { getEraForYear, getCenturyForYear } from "@/utils/tech-tree-utils"
-import { supabase } from "@/lib/supabaseClient" 
+import { supabase, supabaseConfigured } from "@/lib/supabaseClient"
 import { loadJSON, saveJSON } from "@/utils/storage"
 
 
@@ -44,7 +44,9 @@ export const useTechTreeState = (initialNodes: TechNode[] = []) => {
   useEffect(() => {
     // Set the initial persistent nodes from the server props
     setPersistentNodes(initialNodes)
-    
+
+    if (!supabaseConfigured) return
+
     const channel = supabase.channel('realtime-developments')
       .on(
         'postgres_changes',
