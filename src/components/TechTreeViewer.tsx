@@ -305,6 +305,7 @@ export default function TechTreeViewer({ nodes, links }: Props) {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
   const [showFieldDropdown, setShowFieldDropdown] = useState(false);
+  const [fieldSearch, setFieldSearch] = useState('');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [viewportW, setViewportW] = useState(1920);
   const [viewportH, setViewportH] = useState(1080);
@@ -751,10 +752,22 @@ export default function TechTreeViewer({ nodes, links }: Props) {
           </button>
           {showFieldDropdown && (
             <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-64 overflow-y-auto z-50">
+              <div className="sticky top-0 bg-white border-b border-gray-200 px-3 py-1.5">
+                <input
+                  type="text"
+                  placeholder="Search fields..."
+                  value={fieldSearch}
+                  onChange={e => setFieldSearch(e.target.value)}
+                  className="w-full px-2 py-1 text-xs border border-gray-300 rounded bg-white text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  onPointerDown={e => e.stopPropagation()}
+                />
+              </div>
               {selectedFields.size > 0 && (
                 <button onClick={() => setSelectedFields(new Set())} className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 border-b border-gray-200 font-medium">Clear all</button>
               )}
-              {allFields.map(f => (
+              {allFields
+                .filter(f => !fieldSearch.trim() || f.toLowerCase().includes(fieldSearch.toLowerCase()))
+                .map(f => (
                 <button key={f} className="w-full text-left px-3 py-1.5 hover:bg-gray-100 flex items-center gap-2" onClick={() => toggleField(f)}>
                   <span className="w-3 h-3 rounded-sm border flex-shrink-0" style={{ backgroundColor: selectedFields.has(f) ? getFieldColor(f) : 'transparent', borderColor: getFieldColor(f) }} />
                   <span className="text-xs text-gray-700">{f}</span>
