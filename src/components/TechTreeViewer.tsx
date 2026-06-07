@@ -70,10 +70,11 @@ const NODE_HEIGHT = 180;
 const LANE_HEIGHT = 210;
 const X_PADDING = 40;
 
-function computePositions(nodes: InventionNode[]): PositionedNode[] {
+// Returns a Map<id, {x, y}> — no spreading of node objects
+function computePositionMap(nodes: InventionNode[]): Map<string, { x: number; y: number }> {
   const sorted = [...nodes].sort((a, b) => a.year - b.year);
   const lanes: number[] = [];
-  const positioned: PositionedNode[] = [];
+  const positions = new Map<string, { x: number; y: number }>();
 
   for (const node of sorted) {
     const x = yearToX(node.year);
@@ -89,9 +90,9 @@ function computePositions(nodes: InventionNode[]): PositionedNode[] {
       lanes.push(0);
     }
     lanes[laneIndex] = x + NODE_WIDTH / 2;
-    positioned.push({ ...node, x, y: 120 + laneIndex * LANE_HEIGHT });
+    positions.set(node.id, { x, y: 120 + laneIndex * LANE_HEIGHT });
   }
-  return positioned;
+  return positions;
 }
 
 // ─── Field colors ─────────────────────────────────────────────────────────────
@@ -134,22 +135,37 @@ interface ViewState {
   zoom: number;
 }
 
+// ─── CSS containment style for node cards ─────────────────────────────────────
+
+const NODE_CARD_CONTAINMENT: React.CSSProperties = {
+  contain: 'layout style paint',
+  contentVisibility: 'auto',
+};
+
 // ─── Memoized Node Card ───────────────────────────────────────────────────────
 
 const NodeCard = memo(function NodeCard({
   node,
+  pos,
   onSelect,
 }: {
-  node: PositionedNode;
-  onSelect: (n: PositionedNode) => void;
+  node: InventionNode;
+  pos: { x: number; y: number };
+  onSelect: (nodeId: string) => void;
 }) {
   const [imgFailed, setImgFailed] = useState(false);
   return (
     <div
       className="absolute"
-      style={{ left: node.x, top: node.y, transform: 'translate(-50%,0)', width: NODE_WIDTH }}
+      style={{
+        left: pos.x,
+        top: pos.y,
+        transform: 'translate(-50%,0)',
+        width: NODE_WIDTH,
+        ...NODE_CARD_CONTAINMENT,
+      }}
       onPointerDown={(e) => e.stopPropagation()}
-      onClick={() => onSelect(node)}
+      onClick={() => onSelect(node.id)}
     >
       <div className="bg-white border border-gray-900 cursor-pointer hover:shadow-lg hover:shadow-gray-400/30 transition-shadow duration-100">
         <div className="w-full h-[80px] border-b border-gray-900 overflow-hidden bg-gray-200">
@@ -186,6 +202,55 @@ const NodeCard = memo(function NodeCard({
   );
 });
 
+// ─── BFS Utility for Dependency Focus ─────────────────────────────────────────
+
+function bfsSubgraph(
+  startId: string,
+  linksBySource: Map<string, string[]>,
+  linksByTarget: Map<string, string[]>,
+): { nodeIds: Set<string>; upstreamIds: Set<string>; downstreamIds: Set<string> } {
+  const upstreamIds = new Set<string>();
+  const downstreamIds = new Set<string>();
+
+  // BFS upstream (prerequisites): traverse linksByTarget
+  const upQueue: string[] = [startId];
+  upstreamIds.add(startId);
+  while (upQueue.length > 0) {
+    const current = upQueue.shift()!;
+    const sources = linksByTarget.get(current);
+    if (sources) {
+      for (const s of sources) {
+        if (!upstreamIds.has(s)) {
+          upstreamIds.add(s);
+          upQueue.push(s);
+        }
+      }
+    }
+  }
+
+  // BFS downstream (dependents): traverse linksBySource
+  const downQueue: string[] = [startId];
+  downstreamIds.add(startId);
+  while (downQueue.length > 0) {
+    const current = downQueue.shift()!;
+    const targets = linksBySource.get(current);
+    if (targets) {
+      for (const t of targets) {
+        if (!downstreamIds.has(t)) {
+          downstreamIds.add(t);
+          downQueue.push(t);
+        }
+      }
+    }
+  }
+
+  const nodeIds = new Set<string>();
+  for (const id of upstreamIds) nodeIds.add(id);
+  for (const id of downstreamIds) nodeIds.add(id);
+
+  return { nodeIds, upstreamIds, downstreamIds };
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 interface Props { nodes: InventionNode[]; links: InventionLink[] }
@@ -197,15 +262,34 @@ export default function TechTreeViewer({ nodes, links }: Props) {
   // ── Ref-based view (never triggers re-render) ──
   const viewRef = useRef<ViewState>({ panX: -17000, panY: -200, zoom: 0.5 });
 
-  // ── Settled view (React state, triggers virtualization — debounced) ──
+  // ── Settled view (React state, triggers virtualization — throttled) ──
   const [settled, setSettled] = useState<ViewState>({ panX: -17000, panY: -200, zoom: 0.5 });
+  const lastSettleTimeRef = useRef<number>(0);
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const THROTTLE_MS = 150;
 
   const scheduleSettle = useCallback(() => {
-    if (settleTimer.current) clearTimeout(settleTimer.current);
-    settleTimer.current = setTimeout(() => {
+    const now = Date.now();
+    const elapsed = now - lastSettleTimeRef.current;
+
+    if (elapsed >= THROTTLE_MS) {
+      // Enough time has passed — settle immediately
+      lastSettleTimeRef.current = now;
       setSettled({ ...viewRef.current });
-    }, 80);
+      // Clear any pending trailing settle
+      if (settleTimer.current) {
+        clearTimeout(settleTimer.current);
+        settleTimer.current = null;
+      }
+    } else {
+      // Schedule a trailing settle so we always get a final update on stop
+      if (settleTimer.current) clearTimeout(settleTimer.current);
+      settleTimer.current = setTimeout(() => {
+        lastSettleTimeRef.current = Date.now();
+        setSettled({ ...viewRef.current });
+        settleTimer.current = null;
+      }, THROTTLE_MS - elapsed);
+    }
   }, []);
 
   // Apply transform directly to DOM (no React render)
@@ -221,10 +305,15 @@ export default function TechTreeViewer({ nodes, links }: Props) {
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
   const [showFieldDropdown, setShowFieldDropdown] = useState(false);
-  const [selectedNode, setSelectedNode] = useState<PositionedNode | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [viewportW, setViewportW] = useState(1920);
   const [viewportH, setViewportH] = useState(1080);
   const [zoomDisplay, setZoomDisplay] = useState(50);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+
+  // ── Panning cursor via ref + CSS class ──
+  const panningRef = useRef(false);
+  const panStartRef = useRef({ mx: 0, my: 0, px: 0, py: 0 });
 
   // Debounce search
   useEffect(() => {
@@ -241,13 +330,15 @@ export default function TechTreeViewer({ nodes, links }: Props) {
   }, []);
 
   // ── Precomputed data (stable, no view dependency) ──
-  const positionedNodes = useMemo(() => computePositions(nodes), [nodes]);
+  // Position map: Map<id, {x, y}> — no spreading of node objects
+  const positionMap = useMemo(() => computePositionMap(nodes), [nodes]);
 
-  const nodeMap = useMemo(() => {
-    const m = new Map<string, PositionedNode>();
-    for (const n of positionedNodes) m.set(n.id, n);
+  // Node map by id (raw InventionNode data — no position fields)
+  const nodeDataMap = useMemo(() => {
+    const m = new Map<string, InventionNode>();
+    for (const n of nodes) m.set(n.id, n);
     return m;
-  }, [positionedNodes]);
+  }, [nodes]);
 
   // Pre-build link indexes
   const linksBySource = useMemo(() => {
@@ -276,9 +367,9 @@ export default function TechTreeViewer({ nodes, links }: Props) {
     return Array.from(s).sort();
   }, [nodes]);
 
-  // ── Filtered nodes (depends on search + field filter, NOT view) ──
-  const filteredNodes = useMemo(() => {
-    let result = positionedNodes;
+  // ── Filtered node IDs (depends on search + field filter, NOT view) ──
+  const filteredIds = useMemo(() => {
+    let result = nodes;
     if (debouncedSearch.trim()) {
       const q = debouncedSearch.toLowerCase();
       result = result.filter(n =>
@@ -293,39 +384,85 @@ export default function TechTreeViewer({ nodes, links }: Props) {
     if (selectedFields.size > 0) {
       result = result.filter(n => n.fields.some(f => selectedFields.has(f)));
     }
-    return result;
-  }, [positionedNodes, debouncedSearch, selectedFields]);
+    return new Set(result.map(n => n.id));
+  }, [nodes, debouncedSearch, selectedFields]);
 
-  const filteredIds = useMemo(() => new Set(filteredNodes.map(n => n.id)), [filteredNodes]);
+  // ── Dependency focus BFS ──
+  const focusSubgraph = useMemo(() => {
+    if (!focusedNodeId) return null;
+    return bfsSubgraph(focusedNodeId, linksBySource, linksByTarget);
+  }, [focusedNodeId, linksBySource, linksByTarget]);
 
-  // ── Visible nodes (depends on settled view) ──
+  // ── Effective filtered IDs (overridden in focus mode) ──
+  const effectiveFilteredIds = useMemo(() => {
+    if (focusSubgraph) return focusSubgraph.nodeIds;
+    return filteredIds;
+  }, [focusSubgraph, filteredIds]);
+
+  // ── Full link path string — built once per filter change, NOT per viewport settle ──
+  const fullLinkPath = useMemo(() => {
+    const parts: string[] = [];
+    for (const link of links) {
+      if (!effectiveFilteredIds.has(link.source) || !effectiveFilteredIds.has(link.target)) continue;
+      const sp = positionMap.get(link.source);
+      const tp = positionMap.get(link.target);
+      if (!sp || !tp) continue;
+      parts.push(`M${sp.x} ${sp.y + NODE_HEIGHT / 2}L${tp.x} ${tp.y + NODE_HEIGHT / 2}`);
+    }
+    return parts.join('');
+  }, [links, effectiveFilteredIds, positionMap]);
+
+  // ── Focus mode: separate upstream/downstream path strings ──
+  const focusLinkPaths = useMemo(() => {
+    if (!focusSubgraph || !focusedNodeId) return null;
+    const { upstreamIds, downstreamIds } = focusSubgraph;
+    const upParts: string[] = [];
+    const downParts: string[] = [];
+    for (const link of links) {
+      if (!effectiveFilteredIds.has(link.source) || !effectiveFilteredIds.has(link.target)) continue;
+      const sp = positionMap.get(link.source);
+      const tp = positionMap.get(link.target);
+      if (!sp || !tp) continue;
+      const seg = `M${sp.x} ${sp.y + NODE_HEIGHT / 2}L${tp.x} ${tp.y + NODE_HEIGHT / 2}`;
+      // A link is "upstream" if both source and target are in the upstream set
+      // (i.e., they are prerequisites of the focused node)
+      const isUpstream = upstreamIds.has(link.source) && upstreamIds.has(link.target);
+      // A link is "downstream" if both source and target are in the downstream set
+      const isDownstream = downstreamIds.has(link.source) && downstreamIds.has(link.target);
+      if (isUpstream && !isDownstream) {
+        upParts.push(seg);
+      } else if (isDownstream && !isUpstream) {
+        downParts.push(seg);
+      } else {
+        // Both directions (e.g. focus node itself connects both ways) — put in upstream
+        upParts.push(seg);
+      }
+    }
+    return { upstreamPath: upParts.join(''), downstreamPath: downParts.join('') };
+  }, [focusSubgraph, focusedNodeId, links, effectiveFilteredIds, positionMap]);
+
+  // ── Visible nodes (depends on settled view) — viewport-filtered ──
   const visibleNodes = useMemo(() => {
-    const pad = 600;
+    const pad = 800;
     const { panX, panY, zoom } = settled;
     const vL = (-panX - pad) / zoom;
     const vR = (-panX + viewportW + pad) / zoom;
     const vT = (-panY - pad) / zoom;
     const vB = (-panY + viewportH + pad) / zoom;
-    return filteredNodes.filter(n =>
-      n.x + NODE_WIDTH / 2 >= vL && n.x - NODE_WIDTH / 2 <= vR &&
-      n.y + NODE_HEIGHT >= vT && n.y <= vB
-    );
-  }, [filteredNodes, settled, viewportW, viewportH]);
-
-  // ── Visible links as single SVG path ──
-  const linkPath = useMemo(() => {
-    const visIds = new Set(visibleNodes.map(n => n.id));
-    const parts: string[] = [];
-    for (const link of links) {
-      if (!filteredIds.has(link.source) || !filteredIds.has(link.target)) continue;
-      if (!visIds.has(link.source) && !visIds.has(link.target)) continue;
-      const s = nodeMap.get(link.source);
-      const t = nodeMap.get(link.target);
-      if (!s || !t) continue;
-      parts.push(`M${s.x} ${s.y + NODE_HEIGHT / 2}L${t.x} ${t.y + NODE_HEIGHT / 2}`);
+    const result: { node: InventionNode; pos: { x: number; y: number } }[] = [];
+    for (const id of effectiveFilteredIds) {
+      const pos = positionMap.get(id);
+      if (!pos) continue;
+      if (
+        pos.x + NODE_WIDTH / 2 >= vL && pos.x - NODE_WIDTH / 2 <= vR &&
+        pos.y + NODE_HEIGHT >= vT && pos.y <= vB
+      ) {
+        const node = nodeDataMap.get(id);
+        if (node) result.push({ node, pos });
+      }
     }
-    return parts.join('');
-  }, [links, visibleNodes, filteredIds, nodeMap]);
+    return result;
+  }, [effectiveFilteredIds, positionMap, nodeDataMap, settled, viewportW, viewportH]);
 
   // ── Timeline labels ──
   const timelineLabels = useMemo(() => {
@@ -344,13 +481,35 @@ export default function TechTreeViewer({ nodes, links }: Props) {
     return xToYear(cx);
   }, [settled, viewportW]);
 
-  // ── Pan handlers (ref-based, no React state during drag) ──
-  const panningRef = useRef(false);
-  const panStartRef = useRef({ mx: 0, my: 0, px: 0, py: 0 });
+  // ── Helper: build a PositionedNode from id (for modal/navigation) ──
+  const getPositionedNode = useCallback((id: string): PositionedNode | null => {
+    const node = nodeDataMap.get(id);
+    const pos = positionMap.get(id);
+    if (!node || !pos) return null;
+    return { ...node, ...pos };
+  }, [nodeDataMap, positionMap]);
 
+  // Selected node for the modal
+  const selectedNode = useMemo(() => {
+    if (!selectedNodeId) return null;
+    return getPositionedNode(selectedNodeId);
+  }, [selectedNodeId, getPositionedNode]);
+
+  // ── Node selection handler (stable callback) ──
+  const handleNodeSelect = useCallback((nodeId: string) => {
+    if (focusedNodeId) {
+      // In focus mode, clicking a node switches focus to that node
+      setFocusedNodeId(nodeId);
+    }
+    setSelectedNodeId(nodeId);
+  }, [focusedNodeId]);
+
+  // ── Pan handlers (ref-based, no React state during drag) ──
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('.ui-overlay, .modal-overlay')) return;
     panningRef.current = true;
+    // Toggle CSS class directly on container
+    containerRef.current?.classList.add('is-panning');
     panStartRef.current = {
       mx: e.clientX, my: e.clientY,
       px: viewRef.current.panX, py: viewRef.current.panY,
@@ -369,6 +528,7 @@ export default function TechTreeViewer({ nodes, links }: Props) {
   const onPointerUp = useCallback(() => {
     if (!panningRef.current) return;
     panningRef.current = false;
+    containerRef.current?.classList.remove('is-panning');
     setSettled({ ...viewRef.current });
   }, []);
 
@@ -425,15 +585,17 @@ export default function TechTreeViewer({ nodes, links }: Props) {
   }, [viewportW, applyTransform]);
 
   // ── Navigate to node ──
-  const navigateToNode = useCallback((node: PositionedNode) => {
+  const navigateToNode = useCallback((id: string) => {
+    const pos = positionMap.get(id);
+    if (!pos) return;
     const v = viewRef.current;
-    v.panX = -node.x * v.zoom + viewportW / 2;
-    v.panY = -node.y * v.zoom + viewportH / 2;
+    v.panX = -pos.x * v.zoom + viewportW / 2;
+    v.panY = -pos.y * v.zoom + viewportH / 2;
     applyTransform();
     setSettled({ ...v });
-    setSelectedNode(node);
+    setSelectedNodeId(id);
     setSearchQuery('');
-  }, [viewportW, viewportH, applyTransform]);
+  }, [viewportW, viewportH, applyTransform, positionMap]);
 
   // ── Field toggle ──
   const toggleField = useCallback((field: string) => {
@@ -448,39 +610,65 @@ export default function TechTreeViewer({ nodes, links }: Props) {
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase();
-    return positionedNodes
+    return nodes
       .filter(n => n.title.toLowerCase().includes(q) || n.subtitle.toLowerCase().includes(q) ||
         String(n.year).includes(q) || n.inventors.some(i => i.toLowerCase().includes(q)) ||
         n.organizations.some(o => o.toLowerCase().includes(q)))
       .slice(0, 15);
-  }, [positionedNodes, searchQuery]);
+  }, [nodes, searchQuery]);
 
   // ── Connections for detail modal ──
   const getConnections = useCallback((id: string) => {
-    const prereqs = (linksByTarget.get(id) || []).map(s => nodeMap.get(s)).filter(Boolean) as PositionedNode[];
-    const deps = (linksBySource.get(id) || []).map(t => nodeMap.get(t)).filter(Boolean) as PositionedNode[];
+    const prereqs = (linksByTarget.get(id) || []).map(s => getPositionedNode(s)).filter(Boolean) as PositionedNode[];
+    const deps = (linksBySource.get(id) || []).map(t => getPositionedNode(t)).filter(Boolean) as PositionedNode[];
     return { prereqs, deps };
-  }, [linksBySource, linksByTarget, nodeMap]);
+  }, [linksBySource, linksByTarget, getPositionedNode]);
+
+  // ── Focus mode handlers ──
+  const enterFocusMode = useCallback((nodeId: string) => {
+    setFocusedNodeId(nodeId);
+    setSelectedNodeId(null);
+  }, []);
+
+  const exitFocusMode = useCallback(() => {
+    setFocusedNodeId(null);
+  }, []);
+
+  // Focused node data for the chip display
+  const focusedNode = useMemo(() => {
+    if (!focusedNodeId) return null;
+    return nodeDataMap.get(focusedNodeId) || null;
+  }, [focusedNodeId, nodeDataMap]);
 
   // ── Render ──
   return (
     <div
       ref={containerRef}
       className="relative w-screen h-screen overflow-hidden bg-[#f5f0e8] select-none"
-      style={{ cursor: panningRef.current ? 'grabbing' : 'grab', touchAction: 'none' }}
+      style={{ cursor: 'grab', touchAction: 'none' }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
     >
+      {/* Inline style for panning cursor — toggled via CSS class on container */}
+      <style>{`.is-panning { cursor: grabbing !important; }`}</style>
+
       {/* Canvas layer — transformed via ref, not React state */}
       <div
         ref={canvasRef}
         style={{ transformOrigin: '0 0', position: 'absolute', top: 0, left: 0, width: CANVAS_MAX_X, height: 100000, willChange: 'transform' }}
       >
-        {/* SVG connections — single path element */}
+        {/* SVG connections — full path rendered at once, no viewport filtering */}
         <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}>
-          <path d={linkPath} stroke="#94a3b8" strokeWidth={1.5} fill="none" opacity={0.4} />
+          {focusLinkPaths ? (
+            <>
+              <path d={focusLinkPaths.upstreamPath} stroke="#3b82f6" strokeWidth={2} fill="none" opacity={0.6} />
+              <path d={focusLinkPaths.downstreamPath} stroke="#22c55e" strokeWidth={2} fill="none" opacity={0.6} />
+            </>
+          ) : (
+            <path d={fullLinkPath} stroke="#94a3b8" strokeWidth={1.5} fill="none" opacity={0.4} />
+          )}
         </svg>
 
         {/* Intro text */}
@@ -491,9 +679,9 @@ export default function TechTreeViewer({ nodes, links }: Props) {
           </p>
         </div>
 
-        {/* Node cards — memoized */}
-        {visibleNodes.map(n => (
-          <NodeCard key={n.id} node={n} onSelect={setSelectedNode} />
+        {/* Node cards — memoized, viewport-filtered */}
+        {visibleNodes.map(({ node, pos }) => (
+          <NodeCard key={node.id} node={node} pos={pos} onSelect={handleNodeSelect} />
         ))}
       </div>
 
@@ -508,6 +696,24 @@ export default function TechTreeViewer({ nodes, links }: Props) {
 
       {/* ── User button ── */}
       <div className="ui-overlay absolute top-3 left-3 z-30"><UserButton /></div>
+
+      {/* ── Focus mode chip ── */}
+      {focusedNode && focusSubgraph && (
+        <div className="ui-overlay absolute top-14 left-1/2 -translate-x-1/2 z-30">
+          <div className="flex items-center gap-2 bg-white border border-gray-300 rounded-full shadow-lg px-4 py-2">
+            <span className="text-sm text-gray-700">
+              <span className="font-semibold">Focused on:</span> {focusedNode.title}
+              <span className="text-gray-400 ml-1">— {focusSubgraph.nodeIds.size} nodes</span>
+            </span>
+            <button
+              onClick={exitFocusMode}
+              className="w-5 h-5 flex items-center justify-center rounded-full bg-gray-200 hover:bg-gray-300 text-gray-600 text-xs font-bold leading-none"
+            >
+              &times;
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Search ── */}
       <div className="ui-overlay absolute top-3 right-3 z-30 w-72">
@@ -526,7 +732,7 @@ export default function TechTreeViewer({ nodes, links }: Props) {
         {searchResults.length > 0 && (
           <div className="mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-80 overflow-y-auto">
             {searchResults.map(n => (
-              <button key={n.id} className="w-full text-left px-3 py-2 hover:bg-gray-100 border-b border-gray-100 last:border-0" onClick={() => navigateToNode(n)}>
+              <button key={n.id} className="w-full text-left px-3 py-2 hover:bg-gray-100 border-b border-gray-100 last:border-0" onClick={() => navigateToNode(n.id)}>
                 <div className="text-sm font-semibold text-gray-800">{n.title}</div>
                 <div className="text-xs text-gray-500">{formatYear(n.year)} · {n.fields.join(', ')}</div>
               </button>
@@ -580,23 +786,25 @@ export default function TechTreeViewer({ nodes, links }: Props) {
       <div className="ui-overlay absolute bottom-16 right-4 z-30 flex flex-col items-center gap-1">
         <button onClick={() => zoomBy(1.4)} className="w-8 h-8 bg-white border border-gray-300 rounded flex items-center justify-center text-gray-700 hover:bg-gray-50 text-lg font-bold">+</button>
         <span className="text-xs font-mono text-gray-600 bg-white/90 px-1.5 py-0.5 rounded border border-gray-200">{zoomDisplay}%</span>
-        <button onClick={() => zoomBy(1 / 1.4)} className="w-8 h-8 bg-white border border-gray-300 rounded flex items-center justify-center text-gray-700 hover:bg-gray-50 text-lg font-bold">−</button>
+        <button onClick={() => zoomBy(1 / 1.4)} className="w-8 h-8 bg-white border border-gray-300 rounded flex items-center justify-center text-gray-700 hover:bg-gray-50 text-lg font-bold">&minus;</button>
       </div>
 
       {/* ── Node count ── */}
       <div className="ui-overlay absolute bottom-4 left-4 z-20">
-        <span className="text-xs font-mono text-gray-500 bg-white/80 px-2 py-1 rounded border border-gray-200">{visibleNodes.length} / {filteredNodes.length} nodes</span>
+        <span className="text-xs font-mono text-gray-500 bg-white/80 px-2 py-1 rounded border border-gray-200">
+          {visibleNodes.length} / {focusSubgraph ? focusSubgraph.nodeIds.size : effectiveFilteredIds.size} nodes
+        </span>
       </div>
 
       {/* ── Detail modal ── */}
       {selectedNode && (() => {
         const { prereqs, deps } = getConnections(selectedNode.id);
         return (
-          <div className="modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setSelectedNode(null)}>
+          <div className="modal-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setSelectedNodeId(null)}>
             <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full mx-4 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
               <div className="relative h-48 bg-gray-200 overflow-hidden rounded-t-lg">
                 <img src={selectedNode.image} alt="" className="w-full h-full object-cover" style={{ objectPosition: selectedNode.imagePosition || 'center' }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-                <button onClick={() => setSelectedNode(null)} className="absolute top-3 right-3 w-8 h-8 bg-white/90 rounded-full flex items-center justify-center text-gray-700 hover:bg-white shadow">&times;</button>
+                <button onClick={() => setSelectedNodeId(null)} className="absolute top-3 right-3 w-8 h-8 bg-white/90 rounded-full flex items-center justify-center text-gray-700 hover:bg-white shadow">&times;</button>
               </div>
               <div className="p-5">
                 <h2 className="text-xl font-bold text-gray-900 uppercase">{selectedNode.title}</h2>
@@ -622,7 +830,7 @@ export default function TechTreeViewer({ nodes, links }: Props) {
                       <div className="mb-2">
                         <span className="text-xs font-semibold uppercase text-gray-500">Prerequisites:</span>
                         <div className="mt-1 flex flex-wrap gap-1">
-                          {prereqs.map(p => <button key={p.id} className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded hover:bg-blue-100" onClick={() => setSelectedNode(p)}>{p.title} ({formatYear(p.year)})</button>)}
+                          {prereqs.map(p => <button key={p.id} className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded hover:bg-blue-100" onClick={() => setSelectedNodeId(p.id)}>{p.title} ({formatYear(p.year)})</button>)}
                         </div>
                       </div>
                     )}
@@ -630,17 +838,23 @@ export default function TechTreeViewer({ nodes, links }: Props) {
                       <div>
                         <span className="text-xs font-semibold uppercase text-gray-500">Enables:</span>
                         <div className="mt-1 flex flex-wrap gap-1">
-                          {deps.map(d => <button key={d.id} className="text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded hover:bg-green-100" onClick={() => setSelectedNode(d)}>{d.title} ({formatYear(d.year)})</button>)}
+                          {deps.map(d => <button key={d.id} className="text-xs bg-green-50 text-green-700 px-2 py-0.5 rounded hover:bg-green-100" onClick={() => setSelectedNodeId(d.id)}>{d.title} ({formatYear(d.year)})</button>)}
                         </div>
                       </div>
                     )}
                   </div>
                 )}
-                {selectedNode.wikipedia && (
-                  <div className="mt-4">
+                <div className="mt-4 flex flex-wrap gap-3">
+                  {selectedNode.wikipedia && (
                     <a href={selectedNode.wikipedia} target="_blank" rel="noopener noreferrer" className="text-sm text-blue-600 hover:text-blue-800 underline">View on Wikipedia &rarr;</a>
-                  </div>
-                )}
+                  )}
+                  <button
+                    onClick={() => enterFocusMode(selectedNode.id)}
+                    className="text-sm bg-indigo-50 text-indigo-700 px-3 py-1 rounded hover:bg-indigo-100 border border-indigo-200 font-medium"
+                  >
+                    Show dependency tree
+                  </button>
+                </div>
               </div>
             </div>
           </div>
