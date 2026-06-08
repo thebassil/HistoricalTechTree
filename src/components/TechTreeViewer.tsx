@@ -304,7 +304,9 @@ export default function TechTreeViewer({ nodes, links }: Props) {
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
+  const [selectedType, setSelectedType] = useState<string>('');
   const [showFieldDropdown, setShowFieldDropdown] = useState(false);
+  const [showTypeDropdown, setShowTypeDropdown] = useState(false);
   const [fieldSearch, setFieldSearch] = useState('');
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [viewportW, setViewportW] = useState(1920);
@@ -368,6 +370,12 @@ export default function TechTreeViewer({ nodes, links }: Props) {
     return Array.from(s).sort();
   }, [nodes]);
 
+  const allTypes = useMemo(() => {
+    const s = new Set<string>();
+    for (const n of nodes) if (n.type) s.add(n.type);
+    return Array.from(s).sort();
+  }, [nodes]);
+
   // ── Filtered node IDs (depends on search + field filter, NOT view) ──
   const filteredIds = useMemo(() => {
     let result = nodes;
@@ -385,8 +393,11 @@ export default function TechTreeViewer({ nodes, links }: Props) {
     if (selectedFields.size > 0) {
       result = result.filter(n => n.fields.some(f => selectedFields.has(f)));
     }
+    if (selectedType) {
+      result = result.filter(n => n.type === selectedType);
+    }
     return new Set(result.map(n => n.id));
-  }, [nodes, debouncedSearch, selectedFields]);
+  }, [nodes, debouncedSearch, selectedFields, selectedType]);
 
   // ── Dependency focus BFS ──
   const focusSubgraph = useMemo(() => {
@@ -771,6 +782,30 @@ export default function TechTreeViewer({ nodes, links }: Props) {
                 <button key={f} className="w-full text-left px-3 py-1.5 hover:bg-gray-100 flex items-center gap-2" onClick={() => toggleField(f)}>
                   <span className="w-3 h-3 rounded-sm border flex-shrink-0" style={{ backgroundColor: selectedFields.has(f) ? getFieldColor(f) : 'transparent', borderColor: getFieldColor(f) }} />
                   <span className="text-xs text-gray-700">{f}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {/* Type filter */}
+        <div className="mt-2 relative">
+          <button
+            onClick={() => setShowTypeDropdown(p => !p)}
+            className="w-full px-3 py-2 text-sm border border-gray-400 rounded bg-white/95 backdrop-blur-sm text-gray-700 text-left hover:bg-gray-50"
+          >
+            {selectedType ? `Type: ${selectedType}` : 'Filter by type'}
+            <svg className="absolute right-2.5 top-2.5 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {showTypeDropdown && (
+            <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-64 overflow-y-auto z-50">
+              {selectedType && (
+                <button onClick={() => { setSelectedType(''); setShowTypeDropdown(false); }} className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 border-b border-gray-200 font-medium">Clear type filter</button>
+              )}
+              {allTypes.map(t => (
+                <button key={t} className={`w-full text-left px-3 py-1.5 hover:bg-gray-100 text-xs ${selectedType === t ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-gray-700'}`} onClick={() => { setSelectedType(t); setShowTypeDropdown(false); }}>
+                  {t}
                 </button>
               ))}
             </div>
